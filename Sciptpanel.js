@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Blacket Script Panel
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description   script panel for blacket.org
-// @author       Jraw
+// @version      4.0
+// @description  Floating script panel for blacket.org
+// @author       Franxe
 // @match        *://blacket.org/*
 // @match        *://*.blacket.org/*
 // @grant        none
@@ -12,23 +12,105 @@
 (function () {
   'use strict';
 
-  /* ─── BLACKET COLORS ─────────────────────────────────────────────
-     Pulled straight from their CSS:
-     Panel bg:      #2f2f2f
-     Panel edge:    #1e1e1e  (inset shadow / border)
-     Input bg:      #1a1a1a
-     Active tab bg: #3b3b3b
-     Text primary:  #ffffff
-     Text muted:    rgba(255,255,255,0.5)
-     Accent blue:   #3b99fc
-     Accent shadow: #1a6cbf  (darker edge of their buttons)
-     Green:         #3ddc84
-     Red:           #e05c5c
-     Purple:        #c792ea
-  ─────────────────────────────────────────────────────────────────── */
+  
+  (function injectAssets() {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap';
+    document.head.appendChild(link);
+    const style = document.createElement('style');
+    style.textContent = `
+      #__bkpanel ::-webkit-scrollbar { width:5px; height:5px; }
+      #__bkpanel ::-webkit-scrollbar-track { background:transparent; }
+      #__bkpanel ::-webkit-scrollbar-thumb { background:#3a3a3a; border-radius:3px; }
+      #__bkpanel ::-webkit-scrollbar-thumb:hover { background:#555; }
+      #__bkp_tabs { scrollbar-width:none; }
+      #__bkp_tabs::-webkit-scrollbar { display:none; }
+      #__bkpanel * { box-sizing:border-box; }
+      .bkp-toggle { position:relative; display:inline-flex; align-items:center; cursor:pointer; flex-shrink:0; }
+      .bkp-toggle input { opacity:0; width:0; height:0; position:absolute; }
+      .bkp-slider { width:38px; height:21px; background:#2a2a2a; border-radius:11px; transition:background 0.2s; position:relative; box-shadow:inset 0 1px 3px rgba(0,0,0,0.5); border:1px solid #3b3b3b; }
+      .bkp-slider::after { content:''; position:absolute; left:2px; top:2px; width:15px; height:15px; border-radius:50%; background:#555; transition:transform 0.2s,background 0.2s; box-shadow:0 1px 3px rgba(0,0,0,0.4); }
+      .bkp-toggle input:checked + .bkp-slider { background:rgba(59,153,252,0.2); border-color:rgba(59,153,252,0.35); }
+      .bkp-toggle input:checked + .bkp-slider::after { transform:translateX(17px); background:#3b99fc; box-shadow:0 0 6px rgba(59,153,252,0.5); }
+      .bkp-swatch { width:26px; height:26px; border-radius:50%; cursor:pointer; transition:transform 0.15s,box-shadow 0.15s; flex-shrink:0; }
+      .bkp-swatch:hover { transform:scale(1.15); }
+    `;
+    document.head.appendChild(style);
+  })();
 
-  /* ─── SCRIPTS REGISTRY ──────────────────────────────────────────── */
+  
+  const DEFAULT_SETTINGS = { hotkey: true, opacity: 100, accentColor: '#3b99fc' };
+  let settings = { ...DEFAULT_SETTINGS };
+  try { const _sv = localStorage.getItem('__bkp_settings'); if (_sv) settings = { ...DEFAULT_SETTINGS, ...JSON.parse(_sv) }; } catch (_) {}
+  function saveSettings() { try { localStorage.setItem('__bkp_settings', JSON.stringify(settings)); } catch (_) {} }
+
   const SCRIPTS = [
+    {
+      id: 'packopener',
+      name: 'Pack Opener',
+      author: 'Jraw',
+      version: '1.0',
+      desc: 'Bulk-opens packs from a prompt. Logs every pull with rarity colors and retries on failure.',
+      type: 'console',
+      requiresPanel: false,
+      code: `const rarityOrder=Object.entries(blacket.rarities).sort((a,b)=>a[1].exp-b[1].exp).map(x=>x[0]);
+const openPack=pack=>new Promise((resolve,reject)=>{
+  blacket.requests.post("/worker3/open",{pack},(data,status)=>{
+    if(status&&status!=="success")reject(new Error(status));
+    else if(data?.error)reject(new Error(data.error));
+    else if(!data?.blook)reject(new Error("No blook in response"));
+    else resolve(data.blook);
+  });
+});
+const main=async(pack,amount)=>{
+  const pulled={};
+  const price=blacket.packs[pack].price;
+  const max_delay=Object.values(blacket.rarities).map(r=>r.wait).reduce((a,b)=>Math.max(a,b));
+  let opened=0,spent=0,bestRarity=null,retries=0;
+  const MAX_RETRIES=5;
+  console.log(\`%cStarting: \${pack} x\${amount}\`,"color:#3b99fc;font-weight:bold;font-family:monospace");
+  for(let i=0;i<amount;i++){
+    try{
+      const blook=await openPack(pack);
+      const rarity=blacket.blooks[blook].rarity;
+      const rData=blacket.rarities[rarity];
+      blacket.user.tokens-=price;
+      spent+=price;opened++;retries=0;
+      pulled[blook]=(pulled[blook]||0)+1;
+      if(!bestRarity||rData.exp>blacket.rarities[bestRarity].exp)bestRarity=rarity;
+      console.log(\`%c[\${opened}/\${amount}] \${blook} (\${rarity}) | Spent: \${spent.toLocaleString()} | Remaining: \${blacket.user.tokens.toLocaleString()}\`,\`color:\${rData.color};font-family:monospace;font-size:1.1em\`);
+      await new Promise(r=>setTimeout(r,rData.wait));
+    }catch(err){
+      retries++;
+      if(retries>MAX_RETRIES){console.error("%cFailed too many times — aborting.","color:red;font-family:monospace");break;}
+      const backoff=max_delay*2**retries;
+      console.warn(\`%cError (\${retries}/\${MAX_RETRIES}), retrying in \${backoff}ms: \${err.message}\`,"color:orange;font-family:monospace");
+      await new Promise(r=>setTimeout(r,backoff));i--;
+    }
+  }
+  console.log("%c— Opening Complete —","color:#3b99fc;font-size:1.5em;font-weight:bold;font-family:monospace");
+  Object.keys(pulled).sort((a,b)=>rarityOrder.indexOf(blacket.blooks[a].rarity)-rarityOrder.indexOf(blacket.blooks[b].rarity)).forEach(blook=>{
+    const rarity=blacket.blooks[blook].rarity;
+    console.log(\`%c\${blook} x\${pulled[blook]} [\${rarity}]\`,\`color:\${blacket.rarities[rarity].color};font-size:1.3em;font-family:monospace\`);
+  });
+};
+let packs=Object.keys(blacket.packs);
+let pack;
+do{
+  const input=prompt("What pack would you like to open?",packs[0]);
+  if(input===null){console.log("%cCancelled.","color:red");throw "";}
+  pack=packs.find(p=>p.toLowerCase()===input.toLowerCase());
+}while(!pack);
+let amount;
+const max=Math.floor(blacket.user.tokens/blacket.packs[pack].price);
+do{
+  const input=prompt(\`How many packs would you like to open? (Maximum: \${max})\`);
+  if(input===null){console.log("%cCancelled.","color:red");throw "";}
+  amount=parseInt(input);
+}while(!amount||amount<1||amount>max);
+main(pack,amount);`
+    },
     {
       id: 'redblack',
       name: 'Red to Black Text',
@@ -195,71 +277,6 @@
       stop: () => { return 'Reload the page to reset badges'; }
     },
     {
-      id: 'packopener',
-      name: 'Pack Opener',
-      author: 'Jraw',
-      version: '1.0',
-      desc: 'Bulk-opens packs from a prompt. Logs every pull with rarity colors and retries on failure.',
-      type: 'console',
-      requiresPanel: false,
-      code: `const rarityOrder=Object.entries(blacket.rarities).sort((a,b)=>a[1].exp-b[1].exp).map(x=>x[0]);
-const openPack=pack=>new Promise((resolve,reject)=>{
-  blacket.requests.post("/worker3/open",{pack},(data,status)=>{
-    if(status&&status!=="success")reject(new Error(status));
-    else if(data?.error)reject(new Error(data.error));
-    else if(!data?.blook)reject(new Error("No blook in response"));
-    else resolve(data.blook);
-  });
-});
-const main=async(pack,amount)=>{
-  const pulled={};
-  const price=blacket.packs[pack].price;
-  const max_delay=Object.values(blacket.rarities).map(r=>r.wait).reduce((a,b)=>Math.max(a,b));
-  let opened=0,spent=0,bestRarity=null,retries=0;
-  const MAX_RETRIES=5;
-  console.log(\`%cStarting: \${pack} x\${amount}\`,"color:#3b99fc;font-weight:bold;font-family:monospace");
-  for(let i=0;i<amount;i++){
-    try{
-      const blook=await openPack(pack);
-      const rarity=blacket.blooks[blook].rarity;
-      const rData=blacket.rarities[rarity];
-      blacket.user.tokens-=price;
-      spent+=price;opened++;retries=0;
-      pulled[blook]=(pulled[blook]||0)+1;
-      if(!bestRarity||rData.exp>blacket.rarities[bestRarity].exp)bestRarity=rarity;
-      console.log(\`%c[\${opened}/\${amount}] \${blook} (\${rarity}) | Spent: \${spent.toLocaleString()} | Remaining: \${blacket.user.tokens.toLocaleString()}\`,\`color:\${rData.color};font-family:monospace;font-size:1.1em\`);
-      await new Promise(r=>setTimeout(r,rData.wait));
-    }catch(err){
-      retries++;
-      if(retries>MAX_RETRIES){console.error("%cFailed too many times — aborting.","color:red;font-family:monospace");break;}
-      const backoff=max_delay*2**retries;
-      console.warn(\`%cError (\${retries}/\${MAX_RETRIES}), retrying in \${backoff}ms: \${err.message}\`,"color:orange;font-family:monospace");
-      await new Promise(r=>setTimeout(r,backoff));i--;
-    }
-  }
-  console.log("%c— Opening Complete —","color:#3b99fc;font-size:1.5em;font-weight:bold;font-family:monospace");
-  Object.keys(pulled).sort((a,b)=>rarityOrder.indexOf(blacket.blooks[a].rarity)-rarityOrder.indexOf(blacket.blooks[b].rarity)).forEach(blook=>{
-    const rarity=blacket.blooks[blook].rarity;
-    console.log(\`%c\${blook} x\${pulled[blook]} [\${rarity}]\`,\`color:\${blacket.rarities[rarity].color};font-size:1.3em;font-family:monospace\`);
-  });
-};
-let packs=Object.keys(blacket.packs);
-let pack;
-do{
-  const input=prompt("What pack would you like to open?",packs[0]);
-  if(input===null){console.log("%cCancelled.","color:red");throw "";}
-  pack=packs.find(p=>p.toLowerCase()===input.toLowerCase());
-}while(!pack);
-let amount;
-const max=Math.floor(blacket.user.tokens/blacket.packs[pack].price);
-do{
-  const input=prompt(\`How many packs would you like to open? (Maximum: \${max})\`);
-  if(input===null){console.log("%cCancelled.","color:red");throw "";}
-  amount=parseInt(input);
-}while(!amount||amount<1||amount>max);
-main(pack,amount);`
-    },
-    {
       id: 'invvalue',
       name: 'Inventory Value',
       author: 'Jraw',
@@ -389,65 +406,94 @@ main(pack,amount);`
     }
   ];
 
-  /* ─── STATE ──────────────────────────────────────────────────────── */
+  
   const injected = {};
   let activeId = SCRIPTS[0].id;
   let panelVisible = true;
   let isDragging = false, dragOffX = 0, dragOffY = 0;
+  let connectedUser = null;
 
-  /* ─── PANEL SHELL ────────────────────────────────────────────────── */
+  
   const panel = document.createElement('div');
   panel.id = '__bkpanel';
   panel.style.cssText = `
-    position:fixed;top:60px;right:20px;width:520px;
-    background:#2f2f2f;
-    border:1px solid #1a1a1a;
-    border-radius:8px;
-    box-shadow:inset 0 -4px rgba(0,0,0,0.3),0 8px 32px rgba(0,0,0,0.6);
+    position:fixed;top:60px;right:20px;width:530px;
+    background:#282828;
+    border:1px solid #151515;
+    border-radius:10px;
+    box-shadow:inset 0 0 0 1px rgba(59,153,252,0.07), 0 0 0 1px #111, 0 16px 48px rgba(0,0,0,0.75);
     z-index:999999;
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     overflow:hidden;user-select:none;
-    display:flex;flex-direction:column;max-height:620px;
+    display:flex;flex-direction:column;max-height:640px;
+    opacity:${settings.opacity / 100};
   `;
 
   panel.innerHTML = `
     <div id="__bkp_header" style="
-      background:#252525;
-      padding:9px 14px;
+      background:linear-gradient(180deg,#252525 0%,#1e1e1e 100%);
+      padding:10px 14px 9px;
       display:flex;align-items:center;gap:10px;
       cursor:grab;
-      border-bottom:1px solid #1a1a1a;
+      border-bottom:1px solid #151515;
       flex-shrink:0;
-      box-shadow:inset 0 -2px rgba(0,0,0,0.2);
+      box-shadow:inset 0 -1px rgba(0,0,0,0.3), 0 1px 0 rgba(255,255,255,0.03);
     ">
-      <div style="display:flex;gap:6px;align-items:center;">
-        <div id="__bkp_close" style="width:12px;height:12px;border-radius:50%;background:#ff5f56;cursor:pointer;box-shadow:0 0 0 1px rgba(0,0,0,0.3);" title="Close"></div>
-        <div id="__bkp_min"   style="width:12px;height:12px;border-radius:50%;background:#febc2e;cursor:pointer;box-shadow:0 0 0 1px rgba(0,0,0,0.3);" title="Minimize"></div>
-        <div style="width:12px;height:12px;border-radius:50%;background:#28c840;box-shadow:0 0 0 1px rgba(0,0,0,0.3);"></div>
+      <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+        <div id="__bkp_close" style="width:12px;height:12px;border-radius:50%;background:#ff5f56;cursor:pointer;box-shadow:0 0 0 1px rgba(0,0,0,0.35);transition:filter 0.1s;" title="Close"></div>
+        <div id="__bkp_min"   style="width:12px;height:12px;border-radius:50%;background:#febc2e;cursor:pointer;box-shadow:0 0 0 1px rgba(0,0,0,0.35);transition:filter 0.1s;" title="Minimize"></div>
+        <div style="width:12px;height:12px;border-radius:50%;background:#28c840;box-shadow:0 0 0 1px rgba(0,0,0,0.35);"></div>
       </div>
-      <div style="flex:1;text-align:center;color:rgba(255,255,255,0.35);font-size:12px;font-weight:500;letter-spacing:0.3px;">Scipt panel by Jraw</div>
-      <div style="font-size:10px;color:rgba(255,255,255,0.15);font-family:monospace;">v3.0</div>
+      <div style="flex:1;text-align:center;">
+        <div style="font-family:'Luckiest Guy',cursive;font-size:16px;color:#3b99fc;letter-spacing:2px;line-height:1;text-shadow:0 0 20px rgba(59,153,252,0.35);">Script Panel</div>
+        <div id="__bkp_userinfo" style="margin-top:4px;font-size:10px;letter-spacing:0.2px;"></div>
+      </div>
+      <div style="font-size:9px;color:rgba(255,255,255,0.12);font-family:monospace;flex-shrink:0;">v4.0</div>
     </div>
 
     <div id="__bkp_tabs" style="
       display:flex;
-      background:#252525;
-      border-bottom:1px solid #1a1a1a;
+      background:#1e1e1e;
+      border-bottom:1px solid #151515;
       flex-shrink:0;
       overflow-x:auto;
       padding:0 4px;
       gap:0;
-      scrollbar-width:none;
     "></div>
 
     <div style="display:flex;flex:1;overflow:hidden;min-height:0;">
-      <div id="__bkp_main" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#2f2f2f;"></div>
+      <div id="__bkp_main" style="flex:1;display:flex;flex-direction:column;overflow:hidden;background:#282828;"></div>
     </div>
   `;
 
   document.body.appendChild(panel);
 
-  /* ─── DRAG ───────────────────────────────────────────────────────── */
+  
+  function updateUserDisplay() {
+    const el = document.getElementById('__bkp_userinfo');
+    if (!el) return;
+    if (connectedUser) {
+      el.innerHTML = `<span style="color:#3ddc84;font-size:7px;vertical-align:middle;">●</span> <span style="color:rgba(255,255,255,0.4);">connected as</span> <span style="font-family:'Luckiest Guy',cursive;color:#fff;font-size:11px;letter-spacing:0.5px;">${connectedUser.username}</span> <span style="color:rgba(255,255,255,0.2);">#${connectedUser.id}</span>`;
+    } else {
+      el.innerHTML = `<span style="color:#444;font-size:7px;vertical-align:middle;">●</span> <span style="color:rgba(255,255,255,0.18);">not connected</span>`;
+    }
+  }
+  updateUserDisplay();
+  const _userPoll = setInterval(() => {
+    if (window.blacket?.user?.username) {
+      connectedUser = window.blacket.user;
+      clearInterval(_userPoll);
+      updateUserDisplay();
+    }
+  }, 300);
+
+  
+  panel.querySelector('#__bkp_close').addEventListener('mouseenter', function() { this.style.filter = 'brightness(1.2)'; });
+  panel.querySelector('#__bkp_close').addEventListener('mouseleave', function() { this.style.filter = ''; });
+  panel.querySelector('#__bkp_min').addEventListener('mouseenter', function() { this.style.filter = 'brightness(1.2)'; });
+  panel.querySelector('#__bkp_min').addEventListener('mouseleave', function() { this.style.filter = ''; });
+
+  
   const header = panel.querySelector('#__bkp_header');
   header.addEventListener('mousedown', e => {
     if (['__bkp_close','__bkp_min'].includes(e.target.id)) return;
@@ -464,16 +510,16 @@ main(pack,amount);`
   });
   document.addEventListener('mouseup', () => { isDragging = false; header.style.cursor = 'grab'; });
 
-  /* ─── CLOSE / MIN ────────────────────────────────────────────────── */
+  
   panel.querySelector('#__bkp_close').addEventListener('click', () => panel.remove());
   panel.querySelector('#__bkp_min').addEventListener('click', () => {
     panelVisible = !panelVisible;
     document.getElementById('__bkp_tabs').style.display = panelVisible ? 'flex' : 'none';
     document.getElementById('__bkp_main').style.display = panelVisible ? 'flex' : 'none';
-    panel.style.maxHeight = panelVisible ? '620px' : 'auto';
+    panel.style.maxHeight = panelVisible ? '640px' : 'auto';
   });
 
-  /* ─── LOG ────────────────────────────────────────────────────────── */
+  
   let logLines = [];
   function addLog(msg, color = '#3b99fc') {
     const time = new Date().toLocaleTimeString('en', { hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
@@ -482,88 +528,201 @@ main(pack,amount);`
     refreshMain();
   }
 
-  /* ─── TABS ───────────────────────────────────────────────────────── */
+  
   function renderTabs() {
     const tabBar = document.getElementById('__bkp_tabs');
     if (!tabBar) return;
-    tabBar.innerHTML = SCRIPTS.map(s => {
-      const isActive = s.id === activeId;
-      const isOn = !!injected[s.id];
-      const dotColor = isOn ? '#3ddc84' : (s.type === 'console' ? '#c792ea' : '#3b99fc');
-      return `
-        <div data-tid="${s.id}" style="
-          display:flex;align-items:center;gap:6px;
-          padding:9px 13px;cursor:pointer;white-space:nowrap;
-          border-bottom:2px solid ${isActive ? '#3b99fc' : 'transparent'};
-          background:${isActive ? '#2f2f2f' : 'transparent'};
-          transition:background 0.1s;flex-shrink:0;
-        ">
-          <div style="width:6px;height:6px;border-radius:50%;background:${dotColor};flex-shrink:0;transition:background 0.2s;"></div>
-          <span style="font-size:12px;color:${isActive ? '#ffffff' : 'rgba(255,255,255,0.4)'};font-weight:${isActive ? '500' : '400'};transition:color 0.1s;">${s.name}</span>
-        </div>
-      `;
+    const accent = settings.accentColor;
+    const allTabs = [...SCRIPTS, { id: '__settings', name: '⚙', type: 'special' }];
+    tabBar.innerHTML = allTabs.map((s, i) => {
+      const isActive  = s.id === activeId;
+      const isSpecial = s.id === '__settings';
+      const isOn      = !!injected[s.id];
+      const dotColor  = isOn ? '#3ddc84' : (s.type === 'console' ? '#c792ea' : accent);
+      return `<div data-tid="${s.id}" style="
+        display:flex;align-items:center;gap:5px;
+        padding:8px ${isSpecial ? '14px' : '12px'};
+        cursor:pointer;white-space:nowrap;flex-shrink:0;
+        border-bottom:2px solid ${isActive ? accent : 'transparent'};
+        background:${isActive ? '#282828' : 'transparent'};
+        transition:background 0.12s;
+        ${i === SCRIPTS.length ? 'margin-left:auto;border-left:1px solid #1a1a1a;' : ''}
+      ">
+        ${!isSpecial ? `<div style="width:5px;height:5px;border-radius:50%;background:${dotColor};flex-shrink:0;box-shadow:${isOn?'0 0 5px '+dotColor:'none'};transition:all 0.2s;"></div>` : ''}
+        <span style="font-family:'Luckiest Guy',cursive;font-size:${isSpecial ? '14px' : '10.5px'};letter-spacing:${isSpecial ? '0' : '0.6px'};color:${isActive ? '#fff' : 'rgba(255,255,255,0.3)'};transition:color 0.12s;">${s.name}</span>
+      </div>`;
     }).join('');
     tabBar.querySelectorAll('[data-tid]').forEach(el => {
       el.addEventListener('click', () => { activeId = el.dataset.tid; renderTabs(); refreshMain(); });
-      el.addEventListener('mouseenter', () => { if (el.dataset.tid !== activeId) el.style.background = '#2a2a2a'; });
+      el.addEventListener('mouseenter', () => { if (el.dataset.tid !== activeId) el.style.background = '#232323'; });
       el.addEventListener('mouseleave', () => { if (el.dataset.tid !== activeId) el.style.background = 'transparent'; });
     });
   }
 
-  /* ─── MAIN ───────────────────────────────────────────────────────── */
+  
   function refreshMain() {
     const main = document.getElementById('__bkp_main');
     if (!main) return;
+
+    if (activeId === '__settings') { renderSettings(main); return; }
+
     const s = SCRIPTS.find(x => x.id === activeId);
     if (!s) return;
-    const isOn = !!injected[s.id];
+    const isOn      = !!injected[s.id];
     const isConsole = s.type === 'console';
-
-    const typeColor = isConsole ? '#c792ea' : '#3b99fc';
-    const typeBg    = isConsole ? 'rgba(199,146,234,0.15)' : 'rgba(59,153,252,0.15)';
+    const accent    = settings.accentColor;
+    const typeColor = isConsole ? '#c792ea' : accent;
+    const typeBg    = isConsole ? 'rgba(199,146,234,0.12)' : `rgba(59,153,252,0.12)`;
     const typeLabel = isConsole ? 'console' : 'inject';
 
     main.innerHTML = `
-      <div style="padding:14px 16px 12px;border-bottom:1px solid #1e1e1e;flex-shrink:0;">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px;">
-          <span style="font-size:14px;font-weight:600;color:#ffffff;">${s.name}</span>
-          <span style="font-size:10px;padding:2px 8px;border-radius:20px;background:${typeBg};color:${typeColor};font-weight:500;">${typeLabel}</span>
-          ${s.requiresPanel ? `<span style="font-size:10px;padding:2px 8px;border-radius:20px;background:rgba(254,188,46,0.15);color:#febc2e;font-weight:500;">panel required</span>` : ''}
+      <div style="padding:14px 16px 12px;border-bottom:1px solid #1c1c1c;flex-shrink:0;background:#242424;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+          <span style="font-family:'Luckiest Guy',cursive;font-size:15px;color:#fff;letter-spacing:0.8px;">${s.name}</span>
+          <span style="font-size:10px;padding:2px 9px;border-radius:20px;background:${typeBg};color:${typeColor};border:1px solid ${typeColor}22;">${typeLabel}</span>
+          ${s.requiresPanel ? `<span style="font-size:10px;padding:2px 9px;border-radius:20px;background:rgba(254,188,46,0.1);color:#febc2e;border:1px solid rgba(254,188,46,0.2);">panel required</span>` : ''}
         </div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.35);">by ${s.author} · v${s.version}</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:5px;line-height:1.5;">${s.desc}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.25);">by ${s.author} · v${s.version}</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:5px;line-height:1.5;">${s.desc}</div>
       </div>
 
-      <div style="flex:1;overflow-y:auto;padding:12px 16px;min-height:0;scrollbar-width:thin;scrollbar-color:#3b3b3b transparent;">
+      <div style="flex:1;overflow-y:auto;padding:12px 16px;min-height:0;">
         ${isConsole ? `
-          <div style="font-size:9px;color:rgba(255,255,255,0.2);margin-bottom:8px;letter-spacing:0.8px;font-weight:600;">PREVIEW</div>
-          <pre style="font-size:10.5px;color:rgba(255,255,255,0.5);line-height:1.65;white-space:pre-wrap;word-break:break-all;margin:0;background:#1a1a1a;padding:12px;border-radius:6px;border:1px solid #3b3b3b;box-shadow:inset 0 2px 4px rgba(0,0,0,0.3);">${s.code.slice(0,500)}${s.code.length>500?'\n...(truncated)':''}</pre>
+          <div style="font-size:9px;color:rgba(255,255,255,0.18);margin-bottom:7px;letter-spacing:1px;font-weight:700;">PREVIEW</div>
+          <pre style="font-size:10.5px;color:rgba(255,255,255,0.45);line-height:1.7;white-space:pre-wrap;word-break:break-all;margin:0;background:#1a1a1a;padding:12px;border-radius:6px;border:1px solid #2e2e2e;box-shadow:inset 0 2px 8px rgba(0,0,0,0.3);">${s.code.slice(0,500)}${s.code.length > 500 ? '\n...(truncated)' : ''}</pre>
         ` : `
-          <div style="font-size:9px;color:rgba(255,255,255,0.2);margin-bottom:8px;letter-spacing:0.8px;font-weight:600;">LOG</div>
-          <div style="font-size:11px;line-height:1.9;background:#1a1a1a;padding:10px 12px;border-radius:6px;border:1px solid #3b3b3b;min-height:60px;box-shadow:inset 0 2px 4px rgba(0,0,0,0.3);">
-            ${logLines.slice(-10).map(l=>`<div><span style="color:rgba(255,255,255,0.2);font-family:monospace;">[${l.time}]</span> <span style="color:${l.color};">${l.msg}</span></div>`).join('') || '<span style="color:rgba(255,255,255,0.2);">No activity yet.</span>'}
+          <div style="font-size:9px;color:rgba(255,255,255,0.18);margin-bottom:7px;letter-spacing:1px;font-weight:700;">LOG</div>
+          <div style="font-size:11px;line-height:2;background:#1a1a1a;padding:10px 12px;border-radius:6px;border:1px solid #2e2e2e;min-height:64px;box-shadow:inset 0 2px 8px rgba(0,0,0,0.3);">
+            ${logLines.slice(-10).map(l => `<div><span style="color:rgba(255,255,255,0.15);font-family:monospace;">[${l.time}]</span> <span style="color:${l.color};">${l.msg}</span></div>`).join('') || '<span style="color:rgba(255,255,255,0.15);">No activity yet.</span>'}
           </div>
         `}
       </div>
 
-      <div style="padding:10px 16px;border-top:1px solid #1e1e1e;display:flex;gap:8px;flex-shrink:0;background:#252525;">
+      <div style="padding:10px 16px;border-top:1px solid #1c1c1c;display:flex;gap:8px;flex-shrink:0;background:#202020;">
         ${isConsole
-          ? `<button data-action="run" style="flex:1;padding:9px;background:#3b99fc;color:white;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit;box-shadow:inset 0 -3px rgba(0,0,0,0.25);transition:filter 0.1s;">Run Script</button>`
-          : `<button data-action="${isOn?'stop':'start'}" style="flex:1;padding:9px;background:${isOn?'#e05c5c':'#3b99fc'};color:white;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;font-family:inherit;box-shadow:inset 0 -3px rgba(0,0,0,0.25);transition:filter 0.1s;">${isOn?'Stop':'Inject'}</button>`
+          ? `<button data-action="run" style="flex:1;padding:10px;background:${accent};color:white;border:none;border-radius:6px;cursor:pointer;font-family:'Luckiest Guy',cursive;font-size:13px;letter-spacing:1px;box-shadow:inset 0 -3px rgba(0,0,0,0.3),0 0 12px ${accent}33;transition:filter 0.1s;">▶ RUN SCRIPT</button>`
+          : `<button data-action="${isOn ? 'stop' : 'start'}" style="flex:1;padding:10px;background:${isOn ? '#e05c5c' : accent};color:white;border:none;border-radius:6px;cursor:pointer;font-family:'Luckiest Guy',cursive;font-size:13px;letter-spacing:1px;box-shadow:inset 0 -3px rgba(0,0,0,0.3),0 0 12px ${isOn ? '#e05c5c' : accent}33;transition:filter 0.1s;">${isOn ? '■ STOP' : '▶ INJECT'}</button>`
         }
       </div>
     `;
 
     main.querySelectorAll('button[data-action]').forEach(btn => {
-      btn.addEventListener('mouseenter', () => btn.style.filter = 'brightness(1.1)');
+      btn.addEventListener('mouseenter', () => btn.style.filter = 'brightness(1.12)');
       btn.addEventListener('mouseleave', () => btn.style.filter = '');
-      btn.addEventListener('mousedown', () => btn.style.filter = 'brightness(0.9)');
-      btn.addEventListener('mouseup',   () => btn.style.filter = 'brightness(1.1)');
+      btn.addEventListener('mousedown',  () => btn.style.filter = 'brightness(0.88)');
+      btn.addEventListener('mouseup',    () => btn.style.filter = 'brightness(1.12)');
       btn.addEventListener('click', () => handleAction(btn.dataset.action, s));
     });
   }
 
-  /* ─── ACTIONS ────────────────────────────────────────────────────── */
+  
+  function renderSettings(main) {
+    const accent = settings.accentColor;
+    const SWATCHES = [
+      { color: '#3b99fc', name: 'Blacket Blue' },
+      { color: '#c792ea', name: 'Purple'       },
+      { color: '#3ddc84', name: 'Green'         },
+      { color: '#febc2e', name: 'Gold'          },
+      { color: '#e05c5c', name: 'Red'           },
+      { color: '#ff9d4d', name: 'Orange'        },
+    ];
+
+    main.innerHTML = `
+      <div style="padding:14px 16px 12px;border-bottom:1px solid #1c1c1c;flex-shrink:0;background:#242424;">
+        <div style="font-family:'Luckiest Guy',cursive;font-size:15px;color:#fff;letter-spacing:0.8px;margin-bottom:3px;">Settings</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.3);">Panel configuration & preferences</div>
+      </div>
+
+      <div style="flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:14px;">
+
+        <div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.2);letter-spacing:1px;font-weight:700;margin-bottom:8px;">HOTKEY</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;background:#1a1a1a;padding:10px 13px;border-radius:7px;border:1px solid #2e2e2e;">
+            <div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.7);">Ctrl <span style="color:rgba(255,255,255,0.3);">+</span> Shift <span style="color:rgba(255,255,255,0.3);">+</span> B</div>
+              <div style="font-size:10px;color:rgba(255,255,255,0.25);margin-top:2px;">Toggle panel visibility</div>
+            </div>
+            <label class="bkp-toggle">
+              <input type="checkbox" id="__bkp_hk" ${settings.hotkey ? 'checked' : ''}>
+              <div class="bkp-slider"></div>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.2);letter-spacing:1px;font-weight:700;margin-bottom:8px;">OPACITY</div>
+          <div style="background:#1a1a1a;padding:10px 13px;border-radius:7px;border:1px solid #2e2e2e;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;">
+              <span style="font-size:12px;color:rgba(255,255,255,0.6);">Panel transparency</span>
+              <span id="__bkp_opval" style="font-size:12px;color:${accent};font-family:'Luckiest Guy',cursive;letter-spacing:0.5px;">${settings.opacity}%</span>
+            </div>
+            <input type="range" id="__bkp_opslider" min="30" max="100" value="${settings.opacity}"
+              style="width:100%;height:4px;accent-color:${accent};cursor:pointer;border-radius:2px;">
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.2);letter-spacing:1px;font-weight:700;margin-bottom:8px;">ACCENT COLOR</div>
+          <div style="display:flex;gap:10px;align-items:center;background:#1a1a1a;padding:12px 13px;border-radius:7px;border:1px solid #2e2e2e;flex-wrap:wrap;">
+            ${SWATCHES.map(sw => `
+              <div class="bkp-swatch" data-color="${sw.color}" title="${sw.name}"
+                style="background:${sw.color};box-shadow:${settings.accentColor === sw.color ? `0 0 0 2px #1a1a1a, 0 0 0 4px ${sw.color}, 0 0 10px ${sw.color}66` : '0 0 0 1px rgba(0,0,0,0.4)'};"></div>
+            `).join('')}
+          </div>
+        </div>
+
+        <div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.2);letter-spacing:1px;font-weight:700;margin-bottom:8px;">ACTIONS</div>
+          <div style="display:flex;gap:8px;">
+            <button id="__bkp_clearlog" style="flex:1;padding:9px;background:#1a1a1a;color:rgba(255,255,255,0.45);border:1px solid #2e2e2e;border-radius:6px;cursor:pointer;font-size:11px;font-family:inherit;transition:background 0.1s;">Clear Log</button>
+            <button id="__bkp_resetdef" style="flex:1;padding:9px;background:#1a1a1a;color:rgba(255,255,255,0.3);border:1px solid #2e2e2e;border-radius:6px;cursor:pointer;font-size:11px;font-family:inherit;transition:background 0.1s;">Reset Defaults</button>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="padding:10px 16px;border-top:1px solid #1c1c1c;background:#202020;flex-shrink:0;">
+        <div style="font-size:10px;color:rgba(255,255,255,0.15);text-align:center;">Changes apply immediately · Colors persist on reload</div>
+      </div>
+    `;
+
+    document.getElementById('__bkp_hk').addEventListener('change', e => {
+      settings.hotkey = e.target.checked; saveSettings();
+    });
+
+    const slider = document.getElementById('__bkp_opslider');
+    const opVal  = document.getElementById('__bkp_opval');
+    slider.addEventListener('input', () => {
+      settings.opacity = parseInt(slider.value);
+      opVal.textContent = settings.opacity + '%';
+      panel.style.opacity = settings.opacity / 100;
+      saveSettings();
+    });
+
+    main.querySelectorAll('.bkp-swatch[data-color]').forEach(sw => {
+      sw.addEventListener('click', () => {
+        settings.accentColor = sw.dataset.color;
+        saveSettings();
+        renderTabs();
+        refreshMain();
+      });
+    });
+
+    document.getElementById('__bkp_clearlog').addEventListener('click', () => {
+      logLines = [];
+      addLog('Log cleared', accent);
+    });
+
+    document.getElementById('__bkp_resetdef').addEventListener('click', () => {
+      settings = { ...DEFAULT_SETTINGS };
+      saveSettings();
+      panel.style.opacity = '1';
+      renderTabs();
+      refreshMain();
+    });
+  }
+
+  
   function handleAction(action, s) {
     if (action === 'start') {
       if (s.run) {
@@ -593,13 +752,13 @@ main(pack,amount);`
     }
   }
 
-  /* ─── HOTKEY ctrl+shift+b ────────────────────────────────────────── */
+  
   document.addEventListener('keydown', e => {
-    if (e.ctrlKey && e.shiftKey && e.key === 'B')
+    if (settings.hotkey && e.ctrlKey && e.shiftKey && e.key === 'B')
       panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
   });
 
-  /* ─── INIT ───────────────────────────────────────────────────────── */
+  
   renderTabs();
   refreshMain();
   addLog('Panel ready', '#3b99fc');
